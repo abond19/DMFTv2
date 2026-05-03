@@ -17,18 +17,18 @@ KEY λ-WEIGHTED ROUTER KERNELS (Stein-derived, both clusters):
               [old code used -P_self*dH_mu_dm1 for c=1: missing kappa mean+lambda → 2× error]
 
 KEY λ-WEIGHTED EXPERT KERNELS:
-  tPhi_cross = (0.5-a1*kappa*r_D)*dH_mu_dm1_lam(P_cross, mw_c, ml)   [cluster-1 main]
-             - a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml)                [c1 Stein correction]
-             - a1*r_sum * dH_mu_dm1(P_self,  mw_s, ml)                [c0 Stein correction]
-  tPhi_self  = (0.5+a1*kappa*r_D)*dH_mu_dm1_lam(P_self, mw_s, ml)    [cluster-0 main]
-             + a1*r_sum * dH_mu_dm1(P_self,  mw_s, ml)                [c0 Stein correction]
-             + a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml)                [c1 Stein correction]
+  tPhi_cross = (0.5-a1*kappa*r_D)*dH_mu_dm1_lam(P_cross, mw_c, ml)  [cluster-1 main]
+             - a1*r_D * H_mu_prime(P_cross, mw_c, ml) * kappa/2     [c1 Stein: E[σ'·σ'(λ)·λ]]
+             - a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)                [c1 Stein: E[σ'·σ(λ)]]
+             - a1*r_D * dH_mu_dm1(P_self,  mw_s, ml)                [c0 Stein correction]
+  tPhi_self  = (0.5+a1*kappa*r_D)*dH_mu_dm1_lam(P_self, mw_s, ml)   [cluster-0 main]
+             + a1*r_D * H_mu_prime(P_self, mw_s, ml) * kappa/2      [c0 Stein: E[σ'·σ'(λ)·λ]]
+             + a1*r_D * dH_mu_dm1(P_self,  mw_s, ml)                [c0 Stein: E[σ'·σ(λ)]]
+             + a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)                [c1 Stein correction]
 
-  KEY: Stein corrections use r_sum = (Rv_self+Rv_cross)/sqrt(2) [the SUM], NOT r_D.
-  Reason: Cov(disc, lambda_c) = (v0-v1).Uc/sqrt(2) = +(Rv_self+Rv_cross)/sqrt(2) for c=0
-                                                     = -(Rv_self+Rv_cross)/sqrt(2) for c=1
-  This is the SUM of router overlaps, not the difference.  At early times when
-  Rv_self≈Rv_cross≈0.3, r_D=0 but r_sum=0.424 — using r_D misses the entire correction.
+  KEY: Stein corrections use r_D = (Rv_self-Rv_cross)/sqrt(2) [the DIFFERENCE].
+  Cov(disc, lam_1) = (V_0-V_1)·U_1/sqrt(2) = (Rv_cross-Rv_self)/sqrt(2) = -r_D.
+  Verified by correct joint-distribution MC (with r_D in covariance matrix) at all Δv.
 
 SigmaC kernel Psi (for a_bar ODE):
   psi_abar = hat_Phi_self + hat_Phi_cross   (no 1/E; see solver psi_abar comment)
@@ -52,7 +52,7 @@ PV COUPLING CORRECTIONS (Bug 5 fix):
 import numpy as np
 from scipy.special import erf
 from dmft.kernels_e1 import (
-    H_mu, dH_mu_dm1, dH_mu_dm2,
+    H_mu, dH_mu_dm1, dH_mu_dm2, H_mu_prime,
     H_mu_lam, dH_mu_dm1_lam, Phi_target_mu,
     K_phi_phip_lam,
     _WW, _ZZ,          # quadrature nodes for SC cross kernel
@@ -68,9 +68,8 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     correlates with z^w through Cov(g_0^noise, z^w) = a1*(Pv_self-Pv_cross)/sqrt(2),
     which generates additional Stein contributions to the hat_Phi kernels.
     """
-    gp    = a1 / np.sqrt(2.0)
-    r_D   = (Rv_self - Rv_cross) / np.sqrt(2.0)
-    r_sum = (Rv_self + Rv_cross) / np.sqrt(2.0)   # SUM of router overlaps
+    gp  = a1 / np.sqrt(2.0)
+    r_D = (Rv_self - Rv_cross) / np.sqrt(2.0)
 
     mw_s = kappa * P_self    # mean of z^w for cluster-0 data (self-cluster)
     mw_c = kappa * P_cross   # mean of z^w for cluster-1 data (cross-cluster)
@@ -114,64 +113,64 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
                    - gp * H_mu_lam(P_self, mw_s, ml))             # c=1: FIXED
 
     # ── λ-weighted expert kernels ─────────────────────────────────────────────
-    # Physical origin: d/dt P_{e,c} = -(alpha/m) * E[G_0 * sigma'(z^w_0) * y * (U_c.x)].
-    # Decompose via multivariate Stein on the joint Gaussian (z^w_0, disc, lam_0, lam_1):
+    # The full cluster-averaged P_self and P_cross signals require contributions
+    # from BOTH clusters.  The cross-cluster terms come from the covariance of
+    # the router g_0 with the "wrong" teacher direction U_c·x:
     #
-    #   Cov(disc, lam_0) = (v0-v1).U0/sqrt(2) = +(Rv_self+Rv_cross)/sqrt(2) = +r_sum
-    #   Cov(disc, lam_1) = (v0-v1).U1/sqrt(2) = -(Rv_self+Rv_cross)/sqrt(2) = -r_sum
-    #   Cov(disc, z^w_0) ≈ (Pv_self-Pv_cross)/sqrt(2) ≈ 0  [Pv coupling, small]
+    #   Cov(disc, lam_0) = (v0-v1)·U_0/sqrt(2) = (Rv_self-Rv_cross)/sqrt(2) = +r_D
+    #   Cov(disc, lam_1) = (v0-v1)·U_1/sqrt(2) = (Rv_cross-Rv_self)/sqrt(2) = -r_D
     #
-    # Note: correction terms use r_sum = (Rv_self+Rv_cross)/sqrt(2), NOT r_D.
-    # Only the mean-G factor (0.5 ± a1*kappa*r_D) uses r_D.
+    # NOTE: the covariance uses r_D = (Rv_self-Rv_cross)/sqrt(2) [the DIFFERENCE],
+    # because V_0·U_1 = Rv_cross and V_1·U_1 = Rv_self, so (V_0-V_1)·U_1 = Rv_cross-Rv_self.
+    # Verified by correct joint-distribution MC at all Δv values.
     #
-    # tPhi_self = E[G_0 * sigma'(z^w_0) * phi(lam_0) * lam_0]:
-    #   cluster-0 main: E[G_0|c0] * E[sigma'(z^w) * phi(lam_0) * lam_0]
-    #                 = (0.5+a1*kappa*r_D) * dH_mu_dm1_lam(P_self, mw_s, ml)
-    #   cluster-0 Stein: Cov(disc,lam_0)*a1 * E[sigma'(z^w)*phi'(lam_0)*lam_0 + sigma'(z^w)*phi(lam_0)]
-    #                  = +a1*r_sum * dH_mu_dm1(P_self, mw_s, ml)  [dominant piece]
-    #   cluster-1 Stein: Cov(disc,lam_0|c1)*a1 * E[sigma'(z^w)*phi'(lam_0_c1)*lam_0_c1]
-    #                  = +a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml)
-    #
-    # tPhi_cross = E[G_0 * sigma'(z^w_0) * phi(lam_1) * lam_1]:
-    #   cluster-1 main: E[G_0|c1] * E[sigma'(z^w) * phi(lam_1) * lam_1]
-    #                 = (0.5-a1*kappa*r_D) * dH_mu_dm1_lam(P_cross, mw_c, ml)
-    #   cluster-1 Stein: Cov(disc,lam_1|c1)*a1 * E[sigma'*{phi'(lam_1)*lam_1+phi(lam_1)}]
-    #                  = -a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml)  [dominant piece]
-    #   cluster-0 Stein: Cov(disc,lam_1|c0)*a1 * E[sigma'(z^w)*phi(lam_0)]
-    #                  = -a1*r_sum * dH_mu_dm1(P_self, mw_s, ml)
+    # tPhi_self = E[G_0·σ'(z^w_0)·φ(λ_0)·λ_0]  (cluster-0 main + cross-cluster Stein):
+    #   main term: (0.5+a1κr_D) * dH_mu_dm1_lam(P_self, mw_s, ml)
+    #   c=0 Stein (Cov(disc,lam_0)=+r_D): +a1*r_D * {H_mu_prime*κ/2 + dH_mu_dm1(P_self)}
+    #   c=1 Stein (Cov(disc,lam_0_c1)=+r_D, lam_0 has mean 0 for c=1 data):
+    #              +a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)
     tPhi_self = ((0.5 + a1*kappa*r_D) * dH_mu_dm1_lam(P_self, mw_s, ml)
-                 + a1*r_sum * dH_mu_dm1(P_self,  mw_s, ml)
-                 + a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml))
+                 + a1*r_D * H_mu_prime(P_self, mw_s, ml) * kappa / 2.0
+                 + a1*r_D * dH_mu_dm1(P_self, mw_s, ml)
+                 + a1*r_D * dH_mu_dm1(P_cross, mw_c, ml))
 
+    # tPhi_cross = E[G_0·σ'(z^w_0)·φ(λ_1)·λ_1]  (cluster-1 main + cross-cluster Stein):
+    #   main term: (0.5-a1κr_D) * dH_mu_dm1_lam(P_cross, mw_c, ml)
+    #   c=1 Stein (Cov(disc,lam_1)=-r_D): -a1*r_D * {H_mu_prime*κ/2 + dH_mu_dm1(P_cross)}
+    #             [H_mu_prime_lam = κ/2 * H_mu_prime, by Stein on lam_1 in E[σ'·σ'(lam1)·lam1]]
+    #   c=0 Stein (Cov(disc,lam_1_c0)=-r_D, lam_1 has mean 0 for c=0 data):
+    #             -a1*r_D * dH_mu_dm1(P_self, mw_s, ml)
+    # Verified by correct joint-distribution MC (r_D covariance) at all Δv values.
     tPhi_cross = ((0.5 - a1*kappa*r_D) * dH_mu_dm1_lam(P_cross, mw_c, ml)
-                  - a1*r_sum * dH_mu_dm1(P_cross, mw_c, ml)
-                  - a1*r_sum * dH_mu_dm1(P_self,  mw_s, ml))
+                  - a1*r_D * H_mu_prime(P_cross, mw_c, ml) * kappa / 2.0
+                  - a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)
+                  - a1*r_D * dH_mu_dm1(P_self,  mw_s, ml))
 
     # ── SigmaC / a_bar kernels (NO lambda factor) ─────────────────────────────
     # hat_Phi_self = E_c0[g_0*sigma(z^w_0)*phi(lambda_0)]
-    # Stein on disc via Cov(disc,lam_0)=+r_sum:
-    #   a1*r_sum * E[sigma(z^w_0)*phi'(lam_0)] = a1*r_sum * dH_mu_dm2(P_self, mw_s, ml)
+    # Stein on disc via Cov(disc,lam_0)=+r_D:
+    #   a1*r_D * E[sigma(z^w_0)*phi'(lam_0)] = a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: +delta_pv * dH_mu_dm1(P_self, mw_s, ml)
     hat_Phi_self = ((0.5 + a1*kappa*r_D) * H_mu(P_self, mw_s, ml)
-                    + a1*r_sum * dH_mu_dm2(P_self, mw_s, ml)
+                    + a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                     + delta_pv * dH_mu_dm1(P_self, mw_s, ml))   # Bug 5 fix
 
     # hat_Phi_cross = E_c1[g_0*sigma(z^w_0)*phi(lambda_1)]
     # Uses same expert-0 weight (z^w_0) on cluster-1 data. ≈ 0 at P_cross=0.
-    # Stein on disc via Cov(disc,lam_1)=-r_sum:
-    #   -a1*r_sum * E[sigma(z^w_0)*phi'(lam_1)] = -a1*r_sum * dH_mu_dm2(P_cross, mw_c, ml)
+    # Stein on disc via Cov(disc,lam_1)=-r_D:
+    #   -a1*r_D * E[sigma(z^w_0)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
     # Pv correction: same Cov(g_0^noise, z^w_0) sign, so same delta_pv sign.
     hat_Phi_cross = ((0.5 - a1*kappa*r_D) * H_mu(P_cross, mw_c, ml)
-                     - a1*r_sum * dH_mu_dm2(P_cross, mw_c, ml)
+                     - a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
                      + delta_pv * dH_mu_dm1(P_cross, mw_c, ml))  # Bug 5 fix
 
     # hat_Phi_cs = E_c1[g_0*sigma(z^w_1)*phi(lambda_1)] [cross-cluster, cross-expert weight]
     # Uses expert-1 weight z^w_1 (self-aligned for cluster-1, so mw_s mean).
-    # Stein on disc via Cov(disc,lam_1)=-r_sum:
-    #   -a1*r_sum * E[sigma(z^w_1)*phi'(lam_1)] = -a1*r_sum * dH_mu_dm2(P_self, mw_s, ml)
+    # Stein on disc via Cov(disc,lam_1)=-r_D:
+    #   -a1*r_D * E[sigma(z^w_1)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: Cov(g_0^noise, z^w_1) = -(Pv_self-Pv_cross)/sqrt(2) (opposite sign).
     hat_Phi_cs = ((0.5 - a1*kappa*r_D) * H_mu(P_self, mw_s, ml)
-                  - a1*r_sum * dH_mu_dm2(P_self, mw_s, ml)
+                  - a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                   - delta_pv * dH_mu_dm1(P_self, mw_s, ml))      # Bug 5 fix
 
     # ── Self-consistency correction kernels (t=0 only) ───────────────────────
