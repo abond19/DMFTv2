@@ -96,6 +96,9 @@ class DMFTSolverStage7eMu:
         self.Delta_v  = np.zeros(N);  self.Delta_v[0]  = cfg.Rv_self0 - cfg.Rv_cross0
         self.nu_w     = np.zeros(N)
         self.nu_v     = np.zeros(N)
+        # Router Onsager correction: disc_ons[n] = delta(E_train[disc|c=1])
+        # Always <= 0. Scalar ODE, no new Volterra matrix needed.
+        self.disc_ons = np.zeros(N)
 
         # Expert weight correlators (diagonal + off-diagonal within same expert)
         self.Cd = np.eye(N);        self.Rd = np.zeros((N, N))
@@ -137,6 +140,8 @@ class DMFTSolverStage7eMu:
         self.tPhi_c     = np.zeros(N)
         self.tPhiv_s    = np.zeros(N)
         self.tPhiv_c    = np.zeros(N)
+        self.tPhiv_c_c1    = np.zeros(N)  # c=1-only tPhiv_cross (for disc_ons source)
+        self.H_mu_prime_c1 = np.zeros(N)  # Stein correction for disc_ons source
         self.Phi_target = Phi_target_mu(cfg.kappa)
 
         # ā Volterra integrand history (Fix B — paper eq.118):
@@ -159,8 +164,9 @@ class DMFTSolverStage7eMu:
         k = compute_kernels_mu(self.P_self[n], self.P_cross[n],
                                 self.Rv_self[n], self.Rv_cross[n],
                                 a1, kappa,
-                                pv_self=self.Pv_self[n, n],    # Bug 5 fix
-                                pv_cross=self.Pv_cross[n, n])  # Bug 5 fix
+                                pv_self=self.Pv_self[n, n],      # Bug 5 fix
+                                pv_cross=self.Pv_cross[n, n],    # Bug 5 fix
+                                disc_ons=self.disc_ons[n])        # Onsager correction
         self.hat_Phi_s[n]       = k['hat_Phi_self']
         self.hat_Phi_cs[n]      = k['hat_Phi_cs']
         self.hat_Phi_cross[n]   = k['hat_Phi_cross']
@@ -168,6 +174,8 @@ class DMFTSolverStage7eMu:
         self.tPhi_c[n]     = k['tPhi_cross']
         self.tPhiv_s[n]    = k['tPhiv_self']
         self.tPhiv_c[n]    = k['tPhiv_cross']
+        self.tPhiv_c_c1[n]    = k['tPhiv_cross_c1']  # c=1 only
+        self.H_mu_prime_c1[n] = k['H_mu_prime_c1']   # Stein correction
 
         # ── ā Volterra integrand (Fix B, paper eq.118) ────────────────────────
         # psi_abar(s) = hat_Phi_self(s) + hat_Phi_cross(s)    [no 1/E, E=2 term]
@@ -214,7 +222,7 @@ class DMFTSolverStage7eMu:
         self.H_abar[n] = inv_E_k * (H_ss_d + H_cc_d + H_sc_o + H_cs_o)  # FIX-A
 
     # ── Main loop ──────────────────────────────────────────────────────────────
-    def run(self, verbose=False, clamp=None):
+    def run(self, verbose=False, clamp=None, tPhi_c_override=None):
         cfg   = self.cfg
         eta   = cfg.eta
         alp   = cfg.alpha_bar
@@ -283,6 +291,12 @@ class DMFTSolverStage7eMu:
                 print(f"  SC correction (t=0):  "
                       f"δΦ_self={delta_tPhi_s:.5f} ({100*delta_tPhi_s/k0['tPhi_self']:.1f}% of tPhi_s)  "
                       f"δΦ_cross={delta_tPhi_c:.5f} ({100*delta_tPhi_c/max(k0['tPhi_cross'],1e-12):.1f}% of tPhi_c)")
+
+        # ── tPhi_c oracle injection (step 0) ──────────────────────────────
+        # If tPhi_c_override is provided, replace the kernel value computed
+        # by _kernels(0) (including any SC correction) at step 0.
+        if tPhi_c_override is not None:
+            self.tPhi_c[0] = tPhi_c_override[0]
 
         for n in trange(cfg.N_steps - 1):
             nn  = n + 1
@@ -955,9 +969,52 @@ class DMFTSolverStage7eMu:
                                      + self.P_self[nn]  * self.Rv_cross[nn])
 
             # ── Cvo diagonal pin (AFTER Rv update, so values are current) ─────
-            # Cvo(t,t) = E[z^v_e(t)·z^v_{e'}(t)] for e≠e'. Under S_E symmetry
-            # with E=2: v_e·Σ_x·v_{e'}/d ≈ κ²·Rv_self·Rv_cross (teacher contribution).
-            self.Cvo[nn, nn] = 2.0 * self.Rv_self[nn] * self.Rv_cross[nn]
+            # Cvo(t,t) = E_x[z^v_e(t)·z^v_e'(t)] for e≠e'.
+            # Exact: Cvo(t,t) = V_e·V_e' + κ²·Rv_self·Rv_cross
+            # d→∞ symmetric ansatz: V_e·V_e' → 2·Rv_self·Rv_cross (noise dirs)
+            # Teacher contribution: κ²·Rv_self·Rv_cross (from E_x[xx^T] = I + κ²·UU^T/E)
+            # Total: (2 + κ²)·Rv_self·Rv_cross.
+            # BUG FIX: was 2·rvs·rvc, missing κ² teacher term (33% too small at κ=1).
+            self.Cvo[nn, nn] = (2.0 + kappa**2) * self.Rv_self[nn] * self.Rv_cross[nn]
+
+            # ── Router Onsager correction — full Volterra equation (new) ────────
+            #
+            # Differentiating the Volterra-integral form of disc_ons and using
+            # ∂_t R_dv = −ν_v·R_dv − ∫M_R^{vd}·R_dv gives:
+            #
+            #  d/dt disc_ons(t) = Source(t) − ν_v(t)·disc_ons(t)
+            #                      − ∫₀ᵗ M_R^{vd}(t,s)·disc_ons(s) ds
+            #
+            # The memory integral uses MRQvd_rn (already computed this step).
+            # Without it, disc_ons grows too fast: the Markovian assumption
+            # (∂_t R_dv ≈ −ν_v only) ignores the router's own memory damping.
+            # Source uses only the c=1 cluster contribution to tPhiv_c;
+            # the c=0 Stein term is not part of E_c1[res·ΔFe].
+            kappa_safe = kappa if abs(kappa) > 1e-10 else 1e-10
+            # Corrected source: Source = (sqrt2/kappa)*tPhiv_c_c1
+            #                          + (a1*P_self*H_mu_prime_c1)/(E*kappa)
+            # Derivation: H_mu_lam = kappa*H_mu + P_self*H_mu_prime (Stein identity).
+            # tPhiv_c_c1 uses H_mu_lam, but E_c1[res*DeltaFe] only maps to the
+            # kappa*H_mu part. The P_self*H_mu_prime Stein term must be added back
+            # to the source to remove its overcounting.
+            source_disc_ons = ((np.sqrt(2.0) / kappa_safe) * self.tPhiv_c_c1[n]
+                               + (a1 * self.P_self[n] * self.H_mu_prime_c1[n])
+                               / (cfg.E * kappa_safe))
+            # G_0/G_1 routing-gate correction.
+            # As routing specialises, cluster-1 examples are effectively
+            # weighted by G_1/G_0 relative to the symmetric case. The source
+            # overestimates E_c1[res*DeltaFe] by this factor; dividing removes it.
+            # G_0_c1 = 0.5 - a1*kappa*r_D,  G_1_c1 = 0.5 + a1*kappa*r_D
+            _G0_c1 = 0.5 - a1 * kappa_safe * self.r_D[n]
+            _G1_c1 = 0.5 + a1 * kappa_safe * self.r_D[n]
+            if abs(_G1_c1) > 1e-10:
+                source_disc_ons *= _G0_c1 / _G1_c1
+            mem_disc_ons = (eta * np.dot(MRQvd_rn, self.disc_ons[:nn])
+                            if n > 0 else 0.0)
+            self.disc_ons[nn] = (self.disc_ons[n]
+                                 + eta * (-self.nu_v[n] * self.disc_ons[n]
+                                          + source_disc_ons
+                                          - mem_disc_ons))
 
             # NOTE: Cdv diagonal stays at 1.0 (set above in Cdv Volterra).
             # Cdv(t,t) = E[z^v_e(t)²] = ||v_e(t)||² = 1 (spherical constraint on router).
@@ -1009,6 +1066,9 @@ class DMFTSolverStage7eMu:
 
             # ── Derived scalars ───────────────────────────────────────────────
             self._kernels(nn)
+            # ── tPhi_c oracle injection (step nn) ──────────────────────
+            if tPhi_c_override is not None and nn < len(tPhi_c_override):
+                self.tPhi_c[nn] = tPhi_c_override[nn]
             self.r_D[nn]     = (self.Rv_self[nn] - self.Rv_cross[nn]) / np.sqrt(2.)
             self.Delta[nn]   = self.P_self[nn]  - self.P_cross[nn]
             self.Delta_v[nn] = self.Rv_self[nn] - self.Rv_cross[nn]

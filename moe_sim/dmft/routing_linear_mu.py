@@ -60,7 +60,7 @@ from dmft.kernels_e1 import (
 
 
 def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
-                       pv_self=0.0, pv_cross=0.0):
+                       pv_self=0.0, pv_cross=0.0, disc_ons=0.0):
     """All single-time kernels at a given time step.
 
     pv_self, pv_cross: diagonal values of Pv_self(t,t) and Pv_cross(t,t).
@@ -70,6 +70,18 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     """
     gp  = a1 / np.sqrt(2.0)
     r_D = (Rv_self - Rv_cross) / np.sqrt(2.0)
+
+    # ── Router Onsager correction ─────────────────────────────────────────
+    # disc_ons = delta(E_train[disc|c=1]) <= 0.
+    # Both clusters use the same corrected r_D (more discriminating for both):
+    #   c=1: G_0 smaller  →  r_D_c = r_D − disc_ons/κ > r_D
+    #   c=0: G_0 larger   →  r_D_s = r_D − disc_ons/κ > r_D  (same)
+    # Only the LEADING (0.5±a1κr_D) factors change; Stein correction terms
+    # (Cov(disc,λ)) are unchanged — disc_ons shifts the MEAN, not covariance.
+    kappa_safe = kappa if abs(kappa) > 1e-10 else 1e-10
+    r_D_c = r_D - disc_ons / kappa_safe   # for c=1 leading factors
+    r_D_s = r_D - disc_ons / kappa_safe   # for c=0 leading factors (same sign)
+
 
     mw_s = kappa * P_self    # mean of z^w for cluster-0 data (self-cluster)
     mw_c = kappa * P_cross   # mean of z^w for cluster-1 data (cross-cluster)
@@ -111,6 +123,13 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
 
     tPhiv_cross = (-gp * P_self * dH_mu_dm1(P_cross, mw_c, ml)   # c=0: correct
                    - gp * H_mu_lam(P_self, mw_s, ml))             # c=1: FIXED
+    # c=1 contribution only — used for disc_ons Onsager source.
+    # The c=0 Stein term is not part of E_c1[res·DeltaFe].
+    tPhiv_cross_c1 = -gp * H_mu_lam(P_self, mw_s, ml)
+    # Stein correction term from H_mu_lam = kappa*H_mu + P_self*H_mu_prime.
+    # The P_self*H_mu_prime part is NOT part of E_c1[res*DeltaFe]; subtract it.
+    # Source_correct = (sqrt2/kappa)*tPhiv_c_c1 + (a1*P_self*H_mu_prime)/(E*kappa)
+    H_mu_prime_c1 = H_mu_prime(P_self, mw_s, ml)   # E[sigma'(z^w_1)*sigma'(lambda_1)]
 
     # ── λ-weighted expert kernels ─────────────────────────────────────────────
     # The full cluster-averaged P_self and P_cross signals require contributions
@@ -129,7 +148,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     #   c=0 Stein (Cov(disc,lam_0)=+r_D): +a1*r_D * {H_mu_prime*κ/2 + dH_mu_dm1(P_self)}
     #   c=1 Stein (Cov(disc,lam_0_c1)=+r_D, lam_0 has mean 0 for c=1 data):
     #              +a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)
-    tPhi_self = ((0.5 + a1*kappa*r_D) * dH_mu_dm1_lam(P_self, mw_s, ml)
+    tPhi_self = ((0.5 + a1*kappa*r_D_s) * dH_mu_dm1_lam(P_self, mw_s, ml)  # Onsager
                  + a1*r_D * H_mu_prime(P_self, mw_s, ml) * kappa / 2.0
                  + a1*r_D * dH_mu_dm1(P_self, mw_s, ml)
                  + a1*r_D * dH_mu_dm1(P_cross, mw_c, ml))
@@ -141,7 +160,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     #   c=0 Stein (Cov(disc,lam_1_c0)=-r_D, lam_1 has mean 0 for c=0 data):
     #             -a1*r_D * dH_mu_dm1(P_self, mw_s, ml)
     # Verified by correct joint-distribution MC (r_D covariance) at all Δv values.
-    tPhi_cross = ((0.5 - a1*kappa*r_D) * dH_mu_dm1_lam(P_cross, mw_c, ml)
+    tPhi_cross = ((0.5 - a1*kappa*r_D_c) * dH_mu_dm1_lam(P_cross, mw_c, ml)  # Onsager
                   - a1*r_D * H_mu_prime(P_cross, mw_c, ml) * kappa / 2.0
                   - a1*r_D * dH_mu_dm1(P_cross, mw_c, ml)
                   - a1*r_D * dH_mu_dm1(P_self,  mw_s, ml))
@@ -151,7 +170,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_0)=+r_D:
     #   a1*r_D * E[sigma(z^w_0)*phi'(lam_0)] = a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: +delta_pv * dH_mu_dm1(P_self, mw_s, ml)
-    hat_Phi_self = ((0.5 + a1*kappa*r_D) * H_mu(P_self, mw_s, ml)
+    hat_Phi_self = ((0.5 + a1*kappa*r_D_s) * H_mu(P_self, mw_s, ml)  # Onsager
                     + a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                     + delta_pv * dH_mu_dm1(P_self, mw_s, ml))   # Bug 5 fix
 
@@ -160,7 +179,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_1)=-r_D:
     #   -a1*r_D * E[sigma(z^w_0)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
     # Pv correction: same Cov(g_0^noise, z^w_0) sign, so same delta_pv sign.
-    hat_Phi_cross = ((0.5 - a1*kappa*r_D) * H_mu(P_cross, mw_c, ml)
+    hat_Phi_cross = ((0.5 - a1*kappa*r_D_c) * H_mu(P_cross, mw_c, ml)  # Onsager
                      - a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
                      + delta_pv * dH_mu_dm1(P_cross, mw_c, ml))  # Bug 5 fix
 
@@ -169,7 +188,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_1)=-r_D:
     #   -a1*r_D * E[sigma(z^w_1)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: Cov(g_0^noise, z^w_1) = -(Pv_self-Pv_cross)/sqrt(2) (opposite sign).
-    hat_Phi_cs = ((0.5 - a1*kappa*r_D) * H_mu(P_self, mw_s, ml)
+    hat_Phi_cs = ((0.5 - a1*kappa*r_D_c) * H_mu(P_self, mw_s, ml)  # Onsager
                   - a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                   - delta_pv * dH_mu_dm1(P_self, mw_s, ml))      # Bug 5 fix
 
@@ -190,6 +209,8 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     return {
         'tPhiv_self':    tPhiv_self,
         'tPhiv_cross':   tPhiv_cross,
+        'tPhiv_cross_c1': tPhiv_cross_c1,  # c=1 only (for disc_ons source)
+        'H_mu_prime_c1':  H_mu_prime_c1,   # Stein correction term for disc_ons
         'tPhi_self':     tPhi_self,
         'tPhi_cross':    tPhi_cross,
         'hat_Phi_self':  hat_Phi_self,

@@ -91,6 +91,7 @@ def run_gf_linear_mu(
     device           = None,
     chunk_size: int  = 4096,
     dtype: torch.dtype = torch.float32,
+    measure_signal: bool = False,
 ):
     """
     Gradient-flow simulation for the E=2 linear-router MoE.
@@ -114,6 +115,9 @@ def run_gf_linear_mu(
     device     : 'cuda' | 'mps' | 'cpu' | None (auto).
     chunk_size : rows of X per matmul call; reduce if you hit OOM.
     dtype      : torch.float32 (default) or torch.float64.
+    measure_signal : if True, also return tc_teacher[step] = E_train[G_0·y·σ'(z^w_0)·λ_1],
+                     the empirical cross-expert signal driving P_cross in the GF.
+                     Useful for the oracle DMFT test.
 
     Returns
     -------
@@ -212,6 +216,7 @@ def run_gf_linear_mu(
     Pv_self_arr    = np.empty(N_steps, dtype=np.float64)
     Pv_cross_arr   = np.empty(N_steps, dtype=np.float64)
     train_loss_arr = np.empty(N_steps, dtype=np.float64)
+    tc_teacher_arr = np.empty(N_steps, dtype=np.float64) if measure_signal else None
 
     def _record(s: int, loss_val: float | None = None):
         """Extract all scalar order-parameters — minimal CPU↔device traffic."""
@@ -274,6 +279,17 @@ def run_gf_linear_mu(
 
         # ── Backward pass: W ──────────────────────────────────────────
 
+        # ── Optional signal measurement (oracle DMFT test) ────────────
+        # tc_teacher = E_train[G_0 · y · σ'(z^w_0) · λ_1]
+        # G_0 = 0.5 + a1·disc (expert-0 gate)
+        # y   = teacher labels
+        # σ'  = _phi_prime(Z0) averaged over m neurons
+        # λ_1 = X[:,1] = U_1·x  (U_1 = e_2, second standard-basis vector)
+        if measure_signal:
+            sp0_mean = _phi_prime(Z0).mean(dim=1)       # (n,) mean σ' over neurons
+            tc_teacher_arr[step] = float((G0 * y * sp0_mean * X[:, 1]).mean())
+
+
         # φ'(Z[e]) for both experts
         sp0 = _phi_prime(Z0)                                        # (n, m)
         sp1 = _phi_prime(Z1)                                        # (n, m)
@@ -311,6 +327,15 @@ def run_gf_linear_mu(
 
         _record(step + 1, loss_val=float(0.5 * res.pow(2).mean()))
 
+    # Record final step (loop ran 0..N-2)
+    if measure_signal:
+        # Final tc_teacher at step N-1: recompute disc/G/Z from final W,V
+        disc_f = (X @ (V[0] - V[1])) * (1.0 / math.sqrt(2.0))
+        G0_f   = 0.5 + a1 * disc_f
+        ZW_f   = _mm_chunk(X, W.T, chunk_size)
+        sp0_f  = _phi_prime(ZW_f[:, :m]).mean(dim=1)
+        tc_teacher_arr[N_steps-1] = float((G0_f * y * sp0_f * X[:, 1]).mean())
+
     return {
         't':          t_arr,
         'a':          a_arr,
@@ -323,4 +348,5 @@ def run_gf_linear_mu(
         'Pv_self':    Pv_self_arr,
         'Pv_cross':   Pv_cross_arr,
         'train_loss': train_loss_arr,
+        **({'tc_teacher': tc_teacher_arr.tolist()} if measure_signal else {}),
     }
