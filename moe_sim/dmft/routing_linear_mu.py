@@ -71,16 +71,16 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     gp  = a1 / np.sqrt(2.0)
     r_D = (Rv_self - Rv_cross) / np.sqrt(2.0)
 
-    # ── Router Onsager correction ─────────────────────────────────────────
-    # disc_ons = delta(E_train[disc|c=1]) <= 0.
-    # Both clusters use the same corrected r_D (more discriminating for both):
-    #   c=1: G_0 smaller  →  r_D_c = r_D − disc_ons/κ > r_D
-    #   c=0: G_0 larger   →  r_D_s = r_D − disc_ons/κ > r_D  (same)
-    # Only the LEADING (0.5±a1κr_D) factors change; Stein correction terms
-    # (Cov(disc,λ)) are unchanged — disc_ons shifts the MEAN, not covariance.
+    # ── Router Onsager correction (disc_ons) ──────────────────────────────
+    # disc_ons = delta(E_train[disc|c=1]) <= 0: training-data routing correction.
+    # Applies ONLY to tPhi kernels (expert weight signals P_self, P_cross).
+    # Does NOT apply to hat_Phi kernels (a_bar Volterra source):
+    #   hat_Phi is a POPULATION expectation (d→∞ limit); disc_ons is a
+    #   finite-n training-data correction that vanishes as d→∞. Applying
+    #   it to hat_Phi inflates psi_abar, making a_bar grow too fast.
     kappa_safe = kappa if abs(kappa) > 1e-10 else 1e-10
-    r_D_c = r_D - disc_ons / kappa_safe   # for c=1 leading factors
-    r_D_s = r_D - disc_ons / kappa_safe   # for c=0 leading factors (same sign)
+    r_D_c = r_D - disc_ons / kappa_safe   # corrected for tPhi_cross (c=1 signal)
+    r_D_s = r_D - disc_ons / kappa_safe   # corrected for tPhi_self  (c=0 signal)
 
 
     mw_s = kappa * P_self    # mean of z^w for cluster-0 data (self-cluster)
@@ -170,7 +170,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_0)=+r_D:
     #   a1*r_D * E[sigma(z^w_0)*phi'(lam_0)] = a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: +delta_pv * dH_mu_dm1(P_self, mw_s, ml)
-    hat_Phi_self = ((0.5 + a1*kappa*r_D_s) * H_mu(P_self, mw_s, ml)  # Onsager
+    hat_Phi_self = ((0.5 + a1*kappa*r_D) * H_mu(P_self, mw_s, ml)   # population OP: no disc_ons
                     + a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                     + delta_pv * dH_mu_dm1(P_self, mw_s, ml))   # Bug 5 fix
 
@@ -179,7 +179,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_1)=-r_D:
     #   -a1*r_D * E[sigma(z^w_0)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
     # Pv correction: same Cov(g_0^noise, z^w_0) sign, so same delta_pv sign.
-    hat_Phi_cross = ((0.5 - a1*kappa*r_D_c) * H_mu(P_cross, mw_c, ml)  # Onsager
+    hat_Phi_cross = ((0.5 - a1*kappa*r_D) * H_mu(P_cross, mw_c, ml)   # population OP: no disc_ons
                      - a1*r_D * dH_mu_dm2(P_cross, mw_c, ml)
                      + delta_pv * dH_mu_dm1(P_cross, mw_c, ml))  # Bug 5 fix
 
@@ -188,7 +188,7 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # Stein on disc via Cov(disc,lam_1)=-r_D:
     #   -a1*r_D * E[sigma(z^w_1)*phi'(lam_1)] = -a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
     # Pv correction: Cov(g_0^noise, z^w_1) = -(Pv_self-Pv_cross)/sqrt(2) (opposite sign).
-    hat_Phi_cs = ((0.5 - a1*kappa*r_D_c) * H_mu(P_self, mw_s, ml)  # Onsager
+    hat_Phi_cs = ((0.5 - a1*kappa*r_D) * H_mu(P_self, mw_s, ml)   # population OP: no disc_ons
                   - a1*r_D * dH_mu_dm2(P_self, mw_s, ml)
                   - delta_pv * dH_mu_dm1(P_self, mw_s, ml))      # Bug 5 fix
 

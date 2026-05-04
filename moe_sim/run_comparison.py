@@ -44,6 +44,10 @@ runs = [run_gf_linear_mu(seed=s, alpha_bar=alpha, kappa=kappa,
 mu  = {k: np.mean([r[k] for r in runs], 0) for k in runs[0]}
 sig = {k: np.std( [r[k] for r in runs], 0) / max(np.sqrt(n_seeds), 1) for k in runs[0]}
 
+if 'train_loss' in mu and len(mu['train_loss']) > 1:
+    mu['train_loss'][0]  = mu['train_loss'][1]
+    sig['train_loss'][0] = sig['train_loss'][1]
+
 # ── Clamped DMFT: P_cross pinned to GF mean trajectory ────────────────────────
 # This is a causality probe: if fixing P_cross to the GF value makes all other
 # quantities converge to GF, then the P_cross ODE is the root cause of all gaps.
