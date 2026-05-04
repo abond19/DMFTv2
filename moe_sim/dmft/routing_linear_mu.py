@@ -126,10 +126,19 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
     # c=1 contribution only — used for disc_ons Onsager source.
     # The c=0 Stein term is not part of E_c1[res·DeltaFe].
     tPhiv_cross_c1 = -gp * H_mu_lam(P_self, mw_s, ml)
-    # Stein correction term from H_mu_lam = kappa*H_mu + P_self*H_mu_prime.
-    # The P_self*H_mu_prime part is NOT part of E_c1[res*DeltaFe]; subtract it.
-    # Source_correct = (sqrt2/kappa)*tPhiv_c_c1 + (a1*P_self*H_mu_prime)/(E*kappa)
-    H_mu_prime_c1 = H_mu_prime(P_self, mw_s, ml)   # E[sigma'(z^w_1)*sigma'(lambda_1)]
+    # Correct Stein identity (verified numerically):
+    #   H_mu_lam(q, m1, m2) = m2·H_mu + q·dH_dm1 + dH_dm2
+    # where dH_dm1 = E[phi'(m1+G1)·phi(m2+G2)]  (sigma'·sigma, partial w.r.t. m1)
+    #       dH_dm2 = E[phi(m1+G1)·phi'(m2+G2)]  (sigma·sigma', partial w.r.t. m2)
+    # NOTE: H_mu_prime = E[phi'·phi'] (Price's theorem) is a DIFFERENT kernel.
+    #       The code previously used H_mu_prime here — that was wrong.
+    #
+    # To extract -a1·H_mu from (sqrt2/kappa)·tPhiv_c_c1 = -(a1/kappa)·H_mu_lam:
+    #   add back (a1/kappa)·(P_self·dH_dm1 + dH_dm2)
+    #   = (a1/kappa)·(H_mu_lam - kappa·H_mu)
+    # giving source = -(a1/kappa)·kappa·H_mu = -a1·H_mu  (no 1/E factor).
+    dH_dm1_c1 = dH_mu_dm1(P_self, mw_s, ml)   # E[phi'(z^w_1)·phi(lambda_1)]
+    dH_dm2_c1 = dH_mu_dm2(P_self, mw_s, ml)   # E[phi(z^w_1)·phi'(lambda_1)]
 
     # ── λ-weighted expert kernels ─────────────────────────────────────────────
     # The full cluster-averaged P_self and P_cross signals require contributions
@@ -210,7 +219,8 @@ def compute_kernels_mu(P_self, P_cross, Rv_self, Rv_cross, a1, kappa,
         'tPhiv_self':    tPhiv_self,
         'tPhiv_cross':   tPhiv_cross,
         'tPhiv_cross_c1': tPhiv_cross_c1,  # c=1 only (for disc_ons source)
-        'H_mu_prime_c1':  H_mu_prime_c1,   # Stein correction term for disc_ons
+        'dH_dm1_c1':      dH_dm1_c1,       # E[phi'(z^w_1)·phi(lambda_1)]  — correct Stein correction
+        'dH_dm2_c1':      dH_dm2_c1,       # E[phi(z^w_1)·phi'(lambda_1)]  — correct Stein correction
         'tPhi_self':     tPhi_self,
         'tPhi_cross':    tPhi_cross,
         'hat_Phi_self':  hat_Phi_self,
