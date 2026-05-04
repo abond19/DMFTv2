@@ -997,7 +997,7 @@ class DMFTSolverStage7eMu:
             # tPhiv_c_c1 uses H_mu_lam, but E_c1[res*DeltaFe] only maps to the
             # kappa*H_mu part. The P_self*H_mu_prime Stein term must be added back
             # to the source to remove its overcounting.
-            source_disc_ons = ((np.sqrt(2.0) / kappa_safe) * self.tPhiv_c_c1[n]
+            source_disc_ons = ((np.sqrt(1.0) / kappa_safe) * self.tPhiv_c_c1[n]
                                + (a1 * self.P_self[n] * self.H_mu_prime_c1[n])
                                / (cfg.E * kappa_safe))
             # G_0/G_1 routing-gate correction.
